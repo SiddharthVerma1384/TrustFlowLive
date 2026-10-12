@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+frontend/dist/
+event_store/*.db
+event_store/*.db-*
+evaluation/results/*.json
+.env
