@@ -4,10 +4,15 @@ import { get, post, del } from "../api";
 // Experiment control: build a scenario (preset OR your own attacks) and run it from the browser.
 export default function Control({ onReset }) {
   const [opts, setOpts] = useState({ scenarios: [], topologies: [], attacks: [] });
+  const [loadError, setLoadError] = useState("");
   const [f, setF] = useState({ scenario: "mixed", topology: "star", hosts: 6, speed: 5, seed: 1, duration: 170 });
   const [custom, setCustom] = useState([]);
   const [a, setA] = useState({ attack: "port_scan", host: "h3", start: 20, end: 70 });
-  useEffect(() => { get("/api/scenarios").then(setOpts); }, []);
+  useEffect(() => {
+    get("/api/scenarios")
+      .then(setOpts)
+      .catch((err) => setLoadError(`Could not load control options: ${err.message}`));
+  }, []);
   const num = (e) => (e.target.type === "number" ? +e.target.value : e.target.value);
   const set = (k) => (e) => setF({ ...f, [k]: num(e) });
   const setAtk = (k) => (e) => setA({ ...a, [k]: num(e) });
@@ -15,6 +20,7 @@ export default function Control({ onReset }) {
 
   return (
     <div className="form">
+      {loadError && <p className="note error">{loadError}</p>}
       <label>Preset scenario<select value={f.scenario} onChange={set("scenario")} disabled={custom.length > 0}>{opts.scenarios.map((s) => <option key={s}>{s}</option>)}</select></label>
       <label>Topology<select value={f.topology} onChange={set("topology")}>{opts.topologies.map((s) => <option key={s}>{s}</option>)}</select></label>
       <label>Hosts<input type="number" min="3" max="12" value={f.hosts} onChange={set("hosts")} /></label>
