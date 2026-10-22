@@ -23,12 +23,25 @@ class Ingest:
         self.store.add_many([make_event(run_id, 0, "run_start", None, scenario=scenario, topology="external",
                                         nodes=nodes, links=links, duration=0, warmup=30, mode="external")])
 
+    def start(self, run_id, scenario, topology, nodes, links, duration=0, warmup=30, mode="external"):
+        """Register a source-defined run before its first scored window arrives."""
+        with self.lock:
+            r = self.runs.setdefault(run_id, {"adapter": EngineAdapter(self.store, run_id), "hosts": set()})
+            if r.get("started"):
+                return
+            r["started"] = True
+            r["hosts"].update(n["id"] for n in nodes if n.get("kind") == "host")
+            self.store.add_many([make_event(run_id, 0, "run_start", None, scenario=scenario, topology=topology,
+                                            nodes=nodes, links=links, duration=duration, warmup=warmup, mode=mode)])
+
     def push(self, run_id, t, host, raw, scenario="external"):
         feats = to_features(raw)                      # may raise ValueError -> HTTP 422
         with self.lock:
             r = self.runs.setdefault(run_id, {"adapter": EngineAdapter(self.store, run_id), "hosts": set()})
             if host not in r["hosts"]:
-                r["hosts"].add(host); self._announce(run_id, r, scenario)
+                r["hosts"].add(host)
+                if not r.get("started"):
+                    self._announce(run_id, r, scenario)
             return r["adapter"].window(t, host, feats)
 
     def label(self, run_id, host, attack, t_start, t_end):

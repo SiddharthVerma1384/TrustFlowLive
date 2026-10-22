@@ -8,7 +8,9 @@ directly from the scenario definition - the engine never sees them.
 Requires: mininet, hping3, iperf, (nmap optional).
 """
 import argparse
+import json
 import time
+from urllib import request
 
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSSwitch
@@ -27,6 +29,15 @@ CMDS = {
 }
 
 
+def post(api_url, path, body):
+    req = request.Request(api_url.rstrip("/") + path,
+                          data=json.dumps(body).encode(),
+                          headers={"Content-Type": "application/json"})
+    with request.urlopen(req, timeout=10) as response:
+        if response.status >= 300:
+            raise RuntimeError(f"backend rejected {path}: HTTP {response.status}")
+
+
 def build(kind, n):
     hosts, nodes, links = topology(kind, n)
     net = Mininet(controller=None, switch=OVSSwitch, autoSetMacs=True)
@@ -43,16 +54,26 @@ def main():
     ap.add_argument("--scenario", default="mixed"); ap.add_argument("--topo", default="star")
     ap.add_argument("--hosts", type=int, default=6); ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--run-id", default="live")
+    ap.add_argument("--api-url", help="FastAPI base URL; use this in WSL live mode to avoid sharing SQLite")
     a = ap.parse_args()
     setLogLevel("info")
-    store = EventStore()
+    store = None if a.api_url else EventStore()
     net, hosts, nodes, links = build(a.topo, a.hosts)
     net.start()
     tl = [(x, h, s + a.warmup, e + a.warmup) for x, h, s, e in SCENARIOS[a.scenario]]
-    store.add_many([make_event(a.run_id, 0, "run_start", None, scenario=a.scenario, topology=a.topo,
-                               nodes=nodes, links=links, duration=max([e for *_, e in tl] + [60]) + 20,
-                               warmup=a.warmup, mode="real")] +
-                   [make_event(a.run_id, 0, "label", h, attack=x, t_start=s, t_end=e) for x, h, s, e in tl])
+    if a.api_url:
+        post(a.api_url, "/api/ingest/start", {"run_id": a.run_id, "scenario": a.scenario,
+                                               "topology": a.topo, "nodes": nodes, "links": links,
+                                               "duration": max([e for *_, e in tl] + [60]) + 20,
+                                               "warmup": a.warmup, "mode": "real"})
+        for x, h, s, e in tl:
+            post(a.api_url, "/api/ingest/label", {"run_id": a.run_id, "host": h, "attack": x,
+                                                    "t_start": s, "t_end": e})
+    else:
+        store.add_many([make_event(a.run_id, 0, "run_start", None, scenario=a.scenario, topology=a.topo,
+                                   nodes=nodes, links=links, duration=max([e for *_, e in tl] + [60]) + 20,
+                                   warmup=a.warmup, mode="real")] +
+                       [make_event(a.run_id, 0, "label", h, attack=x, t_start=s, t_end=e) for x, h, s, e in tl])
     # benign background: every host pings the victim (h1)
     for h in hosts[1:]:
         net.get(h).cmd(f"ping -i 0.5 {net.get('h1').IP()} >/dev/null 2>&1 &")
@@ -61,7 +82,10 @@ def main():
         time.sleep(max(0, t0 + s - time.time()))
         net.get(h).cmd(CMDS[x].format(d=e - s, dst=net.get("h1").IP()) + " &")
     time.sleep(max([e for *_, e in tl] + [0]) - (time.time() - t0) + 10)
-    store.add_many([make_event(a.run_id, 0, "run_end", None)])
+    if a.api_url:
+        post(a.api_url, "/api/ingest/end", {"run_id": a.run_id})
+    else:
+        store.add_many([make_event(a.run_id, 0, "run_end", None)])
     net.stop()
 
 

@@ -7,3 +7,6 @@ event_store/*.db
 event_store/*.db-*
 evaluation/results/*.json
 .env
+logs/
+logs-backend*.log
+logs-frontend*.log

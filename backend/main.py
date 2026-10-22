@@ -8,6 +8,9 @@ Run from the project root:   uvicorn backend.main:app --reload --port 8000
 """
 import asyncio
 import json
+import os
+import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -95,7 +98,70 @@ class RunRequest(BaseModel):
     custom: Optional[List[dict]] = None     # [{attack, host, start, end}] built in the dashboard
 
 
+class LiveRunRequest(BaseModel):
+    scenario: str = "mixed"
+    topology: str = "star"
+    hosts: int = 6
+    iface: str = "any"
+
+
 current = {"task": None, "run_id": None}
+live = {"process": None, "run_id": None, "request": None, "log": None}
+
+
+def _live_running():
+    process = live.get("process")
+    return bool(process and process.poll() is None)
+
+
+def _stop_live_process():
+    process = live.get("process")
+    if process and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    live.update(process=None, run_id=None, request=None)
+
+
+def _wsl_path(path):
+    """Convert a Windows drive path to the standard WSL /mnt/<drive>/ form."""
+    value = Path(path).resolve().as_posix()
+    if len(value) >= 2 and value[1] == ":":
+        return f"/mnt/{value[0].lower()}{value[2:]}"
+    return value
+
+
+def _start_live_process(req):
+    _stop_live_process()
+    root = Path(__file__).resolve().parent.parent
+    script = root / "scripts" / "wsl" / "start_live.sh"
+    log_dir = root / "logs" / "live"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    run_id = f"live-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    log_path = log_dir / "backend-live.log"
+    distro = os.environ.get("TRUSTFLOW_WSL_DISTRO", "Ubuntu")
+    venv = os.environ.get("TRUSTFLOW_VENV", "/home/user_ss/.venvs/trustflow")
+    args = [
+        "wsl.exe", "-d", distro, "-u", "root", "--", "env",
+        f"TRUSTFLOW_VENV={venv}", "bash", _wsl_path(script),
+        "--iface", req.iface, "--run-id", run_id,
+        "--scenario", req.scenario, "--topology", req.topology,
+        "--hosts", str(req.hosts),
+    ]
+    env = os.environ.copy()
+    env["TRUSTFLOW_VENV"] = venv
+    env["TRUSTFLOW_IFACE"] = req.iface
+    with log_path.open("a", encoding="utf-8") as log:
+        process = subprocess.Popen(args, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
+    live.update(process=process, run_id=run_id, request=req.model_dump(), log=str(log_path))
+    return run_id
+
+
+@app.on_event("shutdown")
+def stop_live_on_shutdown():
+    _stop_live_process()
 
 
 async def _drive(req: RunRequest):
@@ -130,6 +196,42 @@ async def stop_run():
     if current["task"] and not current["task"].done():
         current["task"].cancel()
     return {"stopped": True}
+
+
+@app.post("/api/live/start")
+def start_live(req: LiveRunRequest):
+    if req.scenario not in SCENARIOS:
+        raise HTTPException(400, "unknown scenario")
+    if req.topology not in ("star", "linear", "tree"):
+        raise HTTPException(400, "unknown topology")
+    if not 3 <= req.hosts <= 12:
+        raise HTTPException(400, "hosts must be between 3 and 12")
+    if not req.iface or any(c in req.iface for c in ";&|`$\n\r"):
+        raise HTTPException(400, "invalid capture interface")
+    try:
+        run_id = _start_live_process(req)
+    except FileNotFoundError as e:
+        raise HTTPException(500, f"WSL launcher unavailable: {e}")
+    return {"started": True, "run_id": run_id, "mode": "real"}
+
+
+@app.post("/api/live/stop")
+def stop_live():
+    _stop_live_process()
+    return {"stopped": True}
+
+
+@app.get("/api/live/status")
+def live_status():
+    process = live.get("process")
+    return {
+        "running": _live_running(),
+        "run_id": live.get("run_id"),
+        "pid": process.pid if process else None,
+        "exit_code": process.poll() if process else None,
+        "request": live.get("request"),
+        "log": live.get("log"),
+    }
 
 
 @app.delete("/api/events")
@@ -200,6 +302,21 @@ class LabelReq(BaseModel):
     t_end: int
 
 
+class EndReq(BaseModel):
+    run_id: str = "external"
+
+
+class StartReq(BaseModel):
+    run_id: str = "external"
+    scenario: str = "external"
+    topology: str = "external"
+    nodes: List[dict] = []
+    links: List[list] = []
+    duration: int = 0
+    warmup: int = 30
+    mode: str = "external"
+
+
 @app.post("/api/ingest")
 def ingest_one(w: Window):
     try:
@@ -207,6 +324,12 @@ def ingest_one(w: Window):
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"state": out["state"], "trust": out["trust"], "anomaly": out["anomaly"], "phase": out["phase"]}
+
+
+@app.post("/api/ingest/start")
+def ingest_start(s: StartReq):
+    ingest.start(s.run_id, s.scenario, s.topology, s.nodes, s.links, s.duration, s.warmup, s.mode)
+    return {"ok": True}
 
 
 @app.post("/api/ingest/batch")
@@ -222,4 +345,10 @@ def ingest_batch(ws: List[Window]):
 @app.post("/api/ingest/label")
 def ingest_label(l: LabelReq):
     ingest.label(l.run_id, l.host, l.attack, l.t_start, l.t_end)
+    return {"ok": True}
+
+
+@app.post("/api/ingest/end")
+def ingest_end(e: EndReq):
+    ingest.end(e.run_id)
     return {"ok": True}
