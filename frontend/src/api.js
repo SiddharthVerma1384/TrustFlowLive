@@ -3,9 +3,10 @@
 // localhost resolves to another service listening on IPv6 ::1.
 export const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 export const WS = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8000/ws";
-const json = (r) => {
-  if (!r.ok) throw new Error(`API request failed (${r.status})`);
-  return r.json();
+const json = async (r) => {
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `API request failed (${r.status})`);
+  return data;
 };
 export const get = (p) => fetch(API + p).then(json);
 export const post = (p, body) =>

@@ -44,9 +44,12 @@ class Ingest:
                     self._announce(run_id, r, scenario)
             return r["adapter"].window(t, host, feats)
 
-    def label(self, run_id, host, attack, t_start, t_end):
+    def label(self, run_id, host, attack, t_start, t_end, target=None):
         """Ground truth, from YOUR scenario definition. Never passed to the engine."""
-        self.store.add_many([make_event(run_id, 0, "label", host, attack=attack, t_start=t_start, t_end=t_end)])
+        data = {"attack": attack, "t_start": t_start, "t_end": t_end}
+        if target:
+            data["target"] = target
+        self.store.add_many([make_event(run_id, 0, "label", host, **data)])
 
     def end(self, run_id):
         self.store.add_many([make_event(run_id, 0, "run_end", None)])

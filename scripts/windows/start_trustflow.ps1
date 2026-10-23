@@ -8,11 +8,23 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 Set-Location $Root
 
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Administrator permission is required so FastAPI can start WSL/Mininet. Requesting elevation..."
+    $elevatedArgs = @("-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
+        "-ApiPort", "$ApiPort", "-FrontendPort", "$FrontendPort")
+    if ($ForceBackend) { $elevatedArgs += "-ForceBackend" }
+    Start-Process powershell.exe -Verb RunAs -WorkingDirectory $Root -ArgumentList $elevatedArgs | Out-Null
+    exit 0
+}
+
 function Test-TrustFlowApi {
     try {
         $health = Invoke-RestMethod "http://127.0.0.1:$ApiPort/api/health" -TimeoutSec 3
         $scenarios = Invoke-RestMethod "http://127.0.0.1:$ApiPort/api/scenarios" -TimeoutSec 3
-        return ($health.ok -eq $true -and $scenarios.scenarios.Count -gt 0)
+        $live = Invoke-RestMethod "http://127.0.0.1:$ApiPort/api/live/preflight" -TimeoutSec 5
+        return ($health.ok -eq $true -and $scenarios.scenarios.Count -gt 0 -and $live.ok -eq $true)
     } catch {
         return $false
     }

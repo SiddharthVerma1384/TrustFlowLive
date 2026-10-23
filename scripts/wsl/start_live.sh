@@ -13,10 +13,12 @@ RUN_ID="${TRUSTFLOW_RUN_ID:-live-$(date +%Y%m%d-%H%M%S)}"
 SCENARIO="${TRUSTFLOW_SCENARIO:-mixed}"
 TOPOLOGY="${TRUSTFLOW_TOPOLOGY:-star}"
 HOSTS="${TRUSTFLOW_HOSTS:-6}"
+TIMELINE_JSON="${TRUSTFLOW_TIMELINE_JSON:-}"
+TIMELINE_B64="${TRUSTFLOW_TIMELINE_B64:-}"
 LOG_DIR="${TRUSTFLOW_LOG_DIR:-$ROOT_DIR/logs/live}"
 
 usage() {
-  echo "Usage: sudo $0 [--api-url URL] [--iface IFACE] [--run-id ID] [--scenario NAME] [--topology NAME] [--hosts N]"
+  echo "Usage: sudo $0 [--api-url URL] [--iface IFACE] [--run-id ID] [--scenario NAME] [--topology NAME] [--hosts N] [--timeline-json JSON|--timeline-b64 VALUE]"
   echo "Starts OS-Ken, metadata-only TShark capture, and the Mininet scenario."
 }
 
@@ -28,6 +30,8 @@ while [[ $# -gt 0 ]]; do
     --scenario) SCENARIO="$2"; shift 2 ;;
     --topology|--topo) TOPOLOGY="$2"; shift 2 ;;
     --hosts) HOSTS="$2"; shift 2 ;;
+    --timeline-json) TIMELINE_JSON="$2"; shift 2 ;;
+    --timeline-b64) TIMELINE_B64="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -81,8 +85,14 @@ if ! kill -0 "$TSHARK_PID" 2>/dev/null; then
 fi
 
 echo "Starting Mininet ($TOPOLOGY, $HOSTS hosts, scenario=$SCENARIO)..."
-"$PYTHON" -m scenarios.mininet_run --scenario "$SCENARIO" --topo "$TOPOLOGY" --hosts "$HOSTS" \
-  --run-id "$RUN_ID" --api-url "$API_URL" >"$LOG_DIR/mininet.log" 2>&1 & MININET_PID=$!
+MININET_ARGS=(--scenario "$SCENARIO" --topo "$TOPOLOGY" --hosts "$HOSTS" --run-id "$RUN_ID" --api-url "$API_URL")
+if [[ -n "$TIMELINE_JSON" ]]; then
+  MININET_ARGS+=(--timeline-json "$TIMELINE_JSON")
+elif [[ -n "$TIMELINE_B64" ]]; then
+  MININET_ARGS+=(--timeline-b64 "$TIMELINE_B64")
+fi
+"$PYTHON" -m scenarios.mininet_run "${MININET_ARGS[@]}" \
+  >"$LOG_DIR/mininet.log" 2>&1 & MININET_PID=$!
 
 while kill -0 "$MININET_PID" 2>/dev/null; do
   if ! kill -0 "$OSKEN_PID" 2>/dev/null; then

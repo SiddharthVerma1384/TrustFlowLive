@@ -7,6 +7,7 @@ PHASE 2 + 4 - FASTAPI COMMUNICATION LAYER + LIVE WEBSOCKET PIPELINE
 Run from the project root:   uvicorn backend.main:app --reload --port 8000
 """
 import asyncio
+import base64
 import json
 import os
 import subprocess
@@ -21,7 +22,7 @@ from event_store.store import EventStore
 from evaluation.metrics import evaluate
 from typing import List, Optional
 from adapter.ingest import Ingest
-from scenarios.simulator import SCENARIOS, ATTACKS, simulate
+from scenarios.simulator import SCENARIOS, ATTACKS, simulate, topology as scenario_topology
 
 app = FastAPI(title="TrustFlow Observability Layer")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -103,6 +104,7 @@ class LiveRunRequest(BaseModel):
     topology: str = "star"
     hosts: int = 6
     iface: str = "any"
+    custom: Optional[List[dict]] = None
 
 
 current = {"task": None, "run_id": None}
@@ -122,7 +124,10 @@ def _stop_live_process():
             process.wait(timeout=8)
         except subprocess.TimeoutExpired:
             process.kill()
-    live.update(process=None, run_id=None, request=None)
+    # Keep the last run metadata visible after a run completes or the user
+    # presses Stop.  Clearing it made `/api/live/status` look as though no run
+    # had ever been started, even though the run and its logs still existed.
+    live.update(process=None)
 
 
 def _wsl_path(path):
@@ -150,13 +155,41 @@ def _start_live_process(req):
         "--scenario", req.scenario, "--topology", req.topology,
         "--hosts", str(req.hosts),
     ]
+    if req.custom:
+        # Passing raw JSON through wsl.exe is unsafe: its Windows command-line
+        # parsing splits the embedded quotes into separate Linux arguments.
+        # Base64 keeps the value to a single shell-safe argument.
+        timeline = json.dumps(req.custom, separators=(",", ":")).encode("utf-8")
+        args.extend(["--timeline-b64", base64.b64encode(timeline).decode("ascii")])
     env = os.environ.copy()
     env["TRUSTFLOW_VENV"] = venv
     env["TRUSTFLOW_IFACE"] = req.iface
+    hosts, nodes, links = scenario_topology(req.topology, req.hosts)
+    custom_end = max((int(item["end"]) for item in (req.custom or [])), default=0)
+    preset_end = max((int(row[3]) for row in SCENARIOS[req.scenario]), default=0)
+    duration = max(custom_end, preset_end, 60) + 30 + 20
+    # Register the complete topology before TShark can observe its first packet.
+    # Otherwise the collector could create an "external" run with only h1.
+    ingest.start(run_id, req.scenario, req.topology, nodes, links, duration, 30, "real")
     with log_path.open("a", encoding="utf-8") as log:
         process = subprocess.Popen(args, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
     live.update(process=process, run_id=run_id, request=req.model_dump(), log=str(log_path))
     return run_id
+
+
+def _check_wsl_access():
+    distro = os.environ.get("TRUSTFLOW_WSL_DISTRO", "Ubuntu")
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-d", distro, "-u", "root", "--", "id", "-u"],
+            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(503, f"WSL is not available: {exc}")
+    output = result.stdout.replace("\x00", "").strip()
+    if result.returncode != 0 or output != "0":
+        detail = (result.stderr or result.stdout).replace("\x00", "").strip()
+        raise HTTPException(503, f"WSL root access failed for {distro}: {detail[-500:]}")
 
 
 @app.on_event("shutdown")
@@ -185,6 +218,7 @@ def scenarios():
 async def start_run(req: RunRequest):
     if req.scenario not in SCENARIOS:
         raise HTTPException(400, "unknown scenario")
+    _stop_live_process()
     if current["task"] and not current["task"].done():
         current["task"].cancel()
     current["task"] = asyncio.create_task(_drive(req))
@@ -208,6 +242,25 @@ def start_live(req: LiveRunRequest):
         raise HTTPException(400, "hosts must be between 3 and 12")
     if not req.iface or any(c in req.iface for c in ";&|`$\n\r"):
         raise HTTPException(400, "invalid capture interface")
+    for item in req.custom or []:
+        attack = item.get("attack")
+        source = item.get("host")
+        target = item.get("target", "h1")
+        try:
+            start, end = int(item.get("start")), int(item.get("end"))
+            source_num = int(str(source).removeprefix("h"))
+            target_num = int(str(target).removeprefix("h"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "custom live attack hosts/times are invalid")
+        if attack not in ATTACKS:
+            raise HTTPException(400, f"unknown attack: {attack}")
+        if not (1 <= source_num <= req.hosts and 1 <= target_num <= req.hosts):
+            raise HTTPException(400, "custom live attack hosts must exist in the selected host range")
+        if source_num == target_num or start < 0 or end <= start:
+            raise HTTPException(400, "custom live attack must have different hosts and end after start")
+    _check_wsl_access()
+    if current["task"] and not current["task"].done():
+        current["task"].cancel()
     try:
         run_id = _start_live_process(req)
     except FileNotFoundError as e:
@@ -232,6 +285,12 @@ def live_status():
         "request": live.get("request"),
         "log": live.get("log"),
     }
+
+
+@app.get("/api/live/preflight")
+def live_preflight():
+    _check_wsl_access()
+    return {"ok": True, "wsl": "ready"}
 
 
 @app.delete("/api/events")
@@ -300,6 +359,7 @@ class LabelReq(BaseModel):
     attack: str
     t_start: int
     t_end: int
+    target: Optional[str] = None
 
 
 class EndReq(BaseModel):
@@ -344,7 +404,7 @@ def ingest_batch(ws: List[Window]):
 
 @app.post("/api/ingest/label")
 def ingest_label(l: LabelReq):
-    ingest.label(l.run_id, l.host, l.attack, l.t_start, l.t_end)
+    ingest.label(l.run_id, l.host, l.attack, l.t_start, l.t_end, l.target)
     return {"ok": True}
 
 

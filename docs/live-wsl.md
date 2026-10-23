@@ -25,6 +25,12 @@ Start the Windows backend so it is reachable from WSL. If it is already running,
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\start_trustflow.ps1
 ```
 
+The launcher requests Administrator permission automatically because the FastAPI process must be able to invoke WSL as root. If an older backend already owns port 8000, run it once with `-ForceBackend` after confirming that the listener is the TrustFlow/old development service:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\start_trustflow.ps1 -ForceBackend
+```
+
 The launcher also starts the Vite frontend. If the backend is already healthy it prints that it is reusing it. Use `-ForceBackend` only after verifying that an unrelated process owns port 8000.
 
 Then, in an elevated WSL shell:
@@ -42,7 +48,9 @@ The Control tab can now start and stop the live WSL pipeline through the FastAPI
 
 The website does not require a new terminal command for each run. Starting a new live run stops the previous live process and starts a replacement with the new inputs. The WSL distribution defaults to `Ubuntu`; set the Windows environment variable `TRUSTFLOW_WSL_DISTRO` if the distribution has another name.
 
-The **Simulator** option remains available for synthetic runs and custom attack timelines. Custom attack rows apply to simulator mode only; real WSL mode uses the scenario driver in `scenarios/mininet_run.py`.
+In Live WSL mode, a custom attack row is also supported. Enter the source host, target host, attack type, start tick, and end tick. The selected source generates the traffic against the selected target. If no custom row is added, the selected preset uses the mappings in `scenarios/simulator.py` (for example, `ddos` uses `h2` against `h1`).
+
+The **Simulator** option remains available for synthetic runs and custom attack timelines. Both modes use the same attack names, but Live WSL executes real traffic commands through `scenarios/mininet_run.py` and TShark observes the resulting metadata.
 
 Open the frontend at `http://localhost:5173`. The first captured host window creates the live run in the same backend event store; subsequent scores, state changes, and enforcement events are pushed over the existing WebSocket.
 

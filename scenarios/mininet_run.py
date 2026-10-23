@@ -8,6 +8,7 @@ directly from the scenario definition - the engine never sees them.
 Requires: mininet, hping3, iperf, (nmap optional).
 """
 import argparse
+import base64
 import json
 import time
 from urllib import request
@@ -55,33 +56,60 @@ def main():
     ap.add_argument("--hosts", type=int, default=6); ap.add_argument("--warmup", type=int, default=30)
     ap.add_argument("--run-id", default="live")
     ap.add_argument("--api-url", help="FastAPI base URL; use this in WSL live mode to avoid sharing SQLite")
+    ap.add_argument("--timeline-json", help="JSON attack overrides: [{attack,host,target,start,end}]")
+    ap.add_argument("--timeline-b64", help="Base64-encoded JSON attack overrides (safe across wsl.exe)")
     a = ap.parse_args()
     setLogLevel("info")
     store = None if a.api_url else EventStore()
     net, hosts, nodes, links = build(a.topo, a.hosts)
     net.start()
-    tl = [(x, h, s + a.warmup, e + a.warmup) for x, h, s, e in SCENARIOS[a.scenario]]
+    if a.timeline_json and a.timeline_b64:
+        raise SystemExit("use only one of --timeline-json and --timeline-b64")
+    if a.timeline_b64:
+        try:
+            a.timeline_json = base64.b64decode(a.timeline_b64, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise SystemExit(f"invalid --timeline-b64: {exc}")
+    if a.timeline_json:
+        try:
+            custom = json.loads(a.timeline_json)
+            base = [(item["attack"], item["host"], int(item["start"]), int(item["end"]), item.get("target", "h1"))
+                    for item in custom]
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"invalid --timeline-json: {exc}")
+    else:
+        base = [(x, h, s, e, "h1") for x, h, s, e in SCENARIOS[a.scenario]]
+    host_set = set(hosts)
+    for attack, source, start, end, target in base:
+        if attack not in CMDS:
+            raise SystemExit(f"unknown attack: {attack}")
+        if source not in host_set or target not in host_set or source == target:
+            raise SystemExit(f"invalid attack endpoints: {source} -> {target}")
+        if start < 0 or end <= start:
+            raise SystemExit(f"invalid attack window: {start}-{end}")
+    tl = [(x, h, s + a.warmup, e + a.warmup, target) for x, h, s, e, target in base]
     if a.api_url:
         post(a.api_url, "/api/ingest/start", {"run_id": a.run_id, "scenario": a.scenario,
                                                "topology": a.topo, "nodes": nodes, "links": links,
-                                               "duration": max([e for *_, e in tl] + [60]) + 20,
+                                                "duration": max([row[3] for row in tl] + [60]) + 20,
                                                "warmup": a.warmup, "mode": "real"})
-        for x, h, s, e in tl:
+        for x, h, s, e, target in tl:
             post(a.api_url, "/api/ingest/label", {"run_id": a.run_id, "host": h, "attack": x,
-                                                    "t_start": s, "t_end": e})
+                                                    "t_start": s, "t_end": e, "target": target})
     else:
         store.add_many([make_event(a.run_id, 0, "run_start", None, scenario=a.scenario, topology=a.topo,
-                                   nodes=nodes, links=links, duration=max([e for *_, e in tl] + [60]) + 20,
+                                   nodes=nodes, links=links, duration=max([row[3] for row in tl] + [60]) + 20,
                                    warmup=a.warmup, mode="real")] +
-                       [make_event(a.run_id, 0, "label", h, attack=x, t_start=s, t_end=e) for x, h, s, e in tl])
+                       [make_event(a.run_id, 0, "label", h, attack=x, t_start=s, t_end=e, target=target)
+                        for x, h, s, e, target in tl])
     # benign background: every host pings the victim (h1)
     for h in hosts[1:]:
         net.get(h).cmd(f"ping -i 0.5 {net.get('h1').IP()} >/dev/null 2>&1 &")
     t0 = time.time()
-    for x, h, s, e in sorted(tl, key=lambda r: r[2]):
+    for x, h, s, e, target in sorted(tl, key=lambda r: r[2]):
         time.sleep(max(0, t0 + s - time.time()))
-        net.get(h).cmd(CMDS[x].format(d=e - s, dst=net.get("h1").IP()) + " &")
-    time.sleep(max([e for *_, e in tl] + [0]) - (time.time() - t0) + 10)
+        net.get(h).cmd(CMDS[x].format(d=e - s, dst=net.get(target).IP()) + " &")
+    time.sleep(max([row[3] for row in tl] + [0]) - (time.time() - t0) + 10)
     if a.api_url:
         post(a.api_url, "/api/ingest/end", {"run_id": a.run_id})
     else:
