@@ -103,6 +103,7 @@ class LiveRunRequest(BaseModel):
     scenario: str = "mixed"
     topology: str = "star"
     hosts: int = 6
+    duration: int = 170
     iface: str = "any"
     custom: Optional[List[dict]] = None
 
@@ -153,7 +154,7 @@ def _start_live_process(req):
         f"TRUSTFLOW_VENV={venv}", "bash", _wsl_path(script),
         "--iface", req.iface, "--run-id", run_id,
         "--scenario", req.scenario, "--topology", req.topology,
-        "--hosts", str(req.hosts),
+        "--hosts", str(req.hosts), "--duration", str(req.duration),
     ]
     if req.custom:
         # Passing raw JSON through wsl.exe is unsafe: its Windows command-line
@@ -165,12 +166,21 @@ def _start_live_process(req):
     env["TRUSTFLOW_VENV"] = venv
     env["TRUSTFLOW_IFACE"] = req.iface
     hosts, nodes, links = scenario_topology(req.topology, req.hosts)
-    custom_end = max((int(item["end"]) for item in (req.custom or [])), default=0)
-    preset_end = max((int(row[3]) for row in SCENARIOS[req.scenario]), default=0)
-    duration = max(custom_end, preset_end, 60) + 30 + 20
+    duration = req.duration
     # Register the complete topology before TShark can observe its first packet.
     # Otherwise the collector could create an "external" run with only h1.
-    ingest.start(run_id, req.scenario, req.topology, nodes, links, duration, 30, "real")
+    ingest.start(
+        run_id, req.scenario, req.topology, nodes, links, duration, 30, "real",
+        inputs={
+            "mode": "live",
+            "scenario": req.scenario,
+            "topology": req.topology,
+            "hosts": req.hosts,
+            "duration": req.duration,
+            "interface": req.iface,
+            "custom_attacks": req.custom or [],
+        },
+    )
     with log_path.open("a", encoding="utf-8") as log:
         process = subprocess.Popen(args, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
     live.update(process=process, run_id=run_id, request=req.model_dump(), log=str(log_path))
@@ -240,6 +250,8 @@ def start_live(req: LiveRunRequest):
         raise HTTPException(400, "unknown topology")
     if not 3 <= req.hosts <= 12:
         raise HTTPException(400, "hosts must be between 3 and 12")
+    if not 60 <= req.duration <= 400:
+        raise HTTPException(400, "duration must be between 60 and 400 ticks")
     if not req.iface or any(c in req.iface for c in ";&|`$\n\r"):
         raise HTTPException(400, "invalid capture interface")
     for item in req.custom or []:
@@ -256,8 +268,8 @@ def start_live(req: LiveRunRequest):
             raise HTTPException(400, f"unknown attack: {attack}")
         if not (1 <= source_num <= req.hosts and 1 <= target_num <= req.hosts):
             raise HTTPException(400, "custom live attack hosts must exist in the selected host range")
-        if source_num == target_num or start < 0 or end <= start:
-            raise HTTPException(400, "custom live attack must have different hosts and end after start")
+        if source_num == target_num or start < 0 or end <= start or end > req.duration:
+            raise HTTPException(400, "custom live attack must have different hosts and fit inside the duration")
     _check_wsl_access()
     if current["task"] and not current["task"].done():
         current["task"].cancel()
@@ -364,6 +376,7 @@ class LabelReq(BaseModel):
 
 class EndReq(BaseModel):
     run_id: str = "external"
+    t: int = 0
 
 
 class StartReq(BaseModel):
@@ -410,5 +423,5 @@ def ingest_label(l: LabelReq):
 
 @app.post("/api/ingest/end")
 def ingest_end(e: EndReq):
-    ingest.end(e.run_id)
+    ingest.end(e.run_id, e.t)
     return {"ok": True}

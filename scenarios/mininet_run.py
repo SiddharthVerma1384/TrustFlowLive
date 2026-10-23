@@ -54,12 +54,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="mixed"); ap.add_argument("--topo", default="star")
     ap.add_argument("--hosts", type=int, default=6); ap.add_argument("--warmup", type=int, default=30)
+    ap.add_argument("--duration", type=int, default=170)
     ap.add_argument("--run-id", default="live")
     ap.add_argument("--api-url", help="FastAPI base URL; use this in WSL live mode to avoid sharing SQLite")
     ap.add_argument("--timeline-json", help="JSON attack overrides: [{attack,host,target,start,end}]")
     ap.add_argument("--timeline-b64", help="Base64-encoded JSON attack overrides (safe across wsl.exe)")
     a = ap.parse_args()
     setLogLevel("info")
+    if not 60 <= a.duration <= 400:
+        raise SystemExit("duration must be between 60 and 400 ticks")
     store = None if a.api_url else EventStore()
     net, hosts, nodes, links = build(a.topo, a.hosts)
     net.start()
@@ -85,20 +88,20 @@ def main():
             raise SystemExit(f"unknown attack: {attack}")
         if source not in host_set or target not in host_set or source == target:
             raise SystemExit(f"invalid attack endpoints: {source} -> {target}")
-        if start < 0 or end <= start:
+        if start < 0 or end <= start or end > a.duration:
             raise SystemExit(f"invalid attack window: {start}-{end}")
     tl = [(x, h, s + a.warmup, e + a.warmup, target) for x, h, s, e, target in base]
     if a.api_url:
         post(a.api_url, "/api/ingest/start", {"run_id": a.run_id, "scenario": a.scenario,
                                                "topology": a.topo, "nodes": nodes, "links": links,
-                                                "duration": max([row[3] for row in tl] + [60]) + 20,
+                                               "duration": a.duration,
                                                "warmup": a.warmup, "mode": "real"})
         for x, h, s, e, target in tl:
             post(a.api_url, "/api/ingest/label", {"run_id": a.run_id, "host": h, "attack": x,
                                                     "t_start": s, "t_end": e, "target": target})
     else:
         store.add_many([make_event(a.run_id, 0, "run_start", None, scenario=a.scenario, topology=a.topo,
-                                   nodes=nodes, links=links, duration=max([row[3] for row in tl] + [60]) + 20,
+                                   nodes=nodes, links=links, duration=a.duration,
                                    warmup=a.warmup, mode="real")] +
                        [make_event(a.run_id, 0, "label", h, attack=x, t_start=s, t_end=e, target=target)
                         for x, h, s, e, target in tl])
@@ -109,11 +112,11 @@ def main():
     for x, h, s, e, target in sorted(tl, key=lambda r: r[2]):
         time.sleep(max(0, t0 + s - time.time()))
         net.get(h).cmd(CMDS[x].format(d=e - s, dst=net.get(target).IP()) + " &")
-    time.sleep(max([row[3] for row in tl] + [0]) - (time.time() - t0) + 10)
+    time.sleep(max(0, a.duration - (time.time() - t0)))
     if a.api_url:
-        post(a.api_url, "/api/ingest/end", {"run_id": a.run_id})
+        post(a.api_url, "/api/ingest/end", {"run_id": a.run_id, "t": a.duration})
     else:
-        store.add_many([make_event(a.run_id, 0, "run_end", None)])
+        store.add_many([make_event(a.run_id, a.duration, "run_end", None)])
     net.stop()
 
 

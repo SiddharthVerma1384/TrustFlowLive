@@ -22,7 +22,7 @@ export default function Control({ onReset }) {
   const start = () => {
     setMessage("Starting WSL live pipeline…");
     const call = mode === "live"
-      ? post("/api/live/start", { scenario: f.scenario, topology: f.topology, hosts: f.hosts, iface, custom: custom.length ? custom : null })
+      ? post("/api/live/start", { scenario: f.scenario, topology: f.topology, hosts: f.hosts, duration: f.duration, iface, custom: custom.length ? custom : null })
       : post("/api/runs", { ...f, custom: custom.length ? custom : null });
     call.then((r) => setMessage(`${mode === "live" ? "Live WSL" : "Simulator"} run started: ${r.run_id || "running"}`))
       .catch((err) => setMessage(`Could not start run: ${err.message}`));
@@ -40,11 +40,11 @@ export default function Control({ onReset }) {
       <label>Hosts<input type="number" min="3" max="12" value={f.hosts} onChange={set("hosts")} /></label>
       {mode === "live" && <label>Capture interface<input value={iface} onChange={(e) => setIface(e.target.value)} placeholder="any" /></label>}
       <label>Ticks / second<input disabled={mode === "live"} type="number" min="1" max="50" value={f.speed} onChange={set("speed")} /></label>
-      <label>Duration (ticks)<input disabled={mode === "live"} type="number" min="60" max="400" value={f.duration} onChange={set("duration")} /></label>
+      <label>Duration (ticks)<input type="number" min="60" max="400" value={f.duration} onChange={set("duration")} /></label>
       <label>Seed<input disabled={mode === "live"} type="number" value={f.seed} onChange={set("seed")} /></label>
 
       <fieldset className="custom">
-        <legend>Custom attack override (optional in Live WSL)</legend>
+        <legend>Custom attack override (optional; replaces the preset timeline)</legend>
         <div className="row">
           <select value={a.attack} onChange={setAtk("attack")}>{opts.attacks.map((x) => <option key={x}>{x}</option>)}</select>
           <input aria-label="source host" placeholder="source h3" style={{ width: 80 }} value={a.host} onChange={setAtk("host")} />
@@ -65,7 +65,7 @@ export default function Control({ onReset }) {
         <button onClick={() => del("/api/events").then(onReset)}>Clear history</button>
       </div>
       {message && <p className="note">{message}</p>}
-      <p className="note">Live WSL starts the real Mininet → OVS → OS-Ken → TShark pipeline. Simulator mode uses synthetic traffic without WSL.</p>
+      <p className="note">Live WSL starts the real Mininet → OVS → OS-Ken → TShark pipeline. Simulator mode uses synthetic traffic without WSL. Speed and seed apply only to Simulator; Live WSL uses real one-second capture windows.</p>
     </div>
   );
 }

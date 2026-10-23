@@ -23,7 +23,7 @@ class Ingest:
         self.store.add_many([make_event(run_id, 0, "run_start", None, scenario=scenario, topology="external",
                                         nodes=nodes, links=links, duration=0, warmup=30, mode="external")])
 
-    def start(self, run_id, scenario, topology, nodes, links, duration=0, warmup=30, mode="external"):
+    def start(self, run_id, scenario, topology, nodes, links, duration=0, warmup=30, mode="external", inputs=None):
         """Register a source-defined run before its first scored window arrives."""
         with self.lock:
             r = self.runs.setdefault(run_id, {"adapter": EngineAdapter(self.store, run_id), "hosts": set()})
@@ -31,8 +31,11 @@ class Ingest:
                 return
             r["started"] = True
             r["hosts"].update(n["id"] for n in nodes if n.get("kind") == "host")
-            self.store.add_many([make_event(run_id, 0, "run_start", None, scenario=scenario, topology=topology,
-                                            nodes=nodes, links=links, duration=duration, warmup=warmup, mode=mode)])
+            data = {"scenario": scenario, "topology": topology, "nodes": nodes, "links": links,
+                    "duration": duration, "warmup": warmup, "mode": mode}
+            if inputs:
+                data["inputs"] = inputs
+            self.store.add_many([make_event(run_id, 0, "run_start", None, **data)])
 
     def push(self, run_id, t, host, raw, scenario="external"):
         feats = to_features(raw)                      # may raise ValueError -> HTTP 422
@@ -51,5 +54,5 @@ class Ingest:
             data["target"] = target
         self.store.add_many([make_event(run_id, 0, "label", host, **data)])
 
-    def end(self, run_id):
-        self.store.add_many([make_event(run_id, 0, "run_end", None)])
+    def end(self, run_id, t=0):
+        self.store.add_many([make_event(run_id, t, "run_end", None)])

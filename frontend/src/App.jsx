@@ -27,6 +27,7 @@ export default function App() {
         <div className="status">
           <span className={tf.connected ? "live" : "off"}>{tf.connected ? "live" : "offline"}</span>
           {tf.run && <span>run {tf.run} · {tf.meta.scenario} · {tf.meta.topology} · t={tf.tick}{tf.ended ? " · finished" : ""}</span>}
+          {tf.run && tf.meta.inputs && <span>hosts={tf.meta.inputs.hosts} · duration={tf.meta.inputs.duration} · iface={tf.meta.inputs.interface}</span>}
           {learning ? <span className="learn">learning baseline…</span> : null}
         </div>
       </header>
